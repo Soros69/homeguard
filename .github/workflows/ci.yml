@@ -1,0 +1,181 @@
+name: CI / CD — HomeGuard
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs on same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────────
+  # 1. SECRET SCANNING — catch leaked keys before anything runs
+  # ────────────────────────────────────────────────────────────────
+  secret-scan:
+    name: 🔍 Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Gitleaks — scan for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ────────────────────────────────────────────────────────────────
+  # 2. LINT + TYPE CHECK
+  # ────────────────────────────────────────────────────────────────
+  lint:
+    name: 🧹 Lint & type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: 'npm' }
+
+      - name: Install frontend deps
+        run: cd frontend && npm ci
+
+      - name: Install backend deps
+        run: cd backend && npm ci
+
+      - name: Lint frontend
+        run: cd frontend && npm run lint
+
+      - name: Type-check backend
+        run: cd backend && npx tsc --noEmit
+
+  # ────────────────────────────────────────────────────────────────
+  # 3. UNIT TESTS
+  # ────────────────────────────────────────────────────────────────
+  test:
+    name: 🧪 Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: 'npm' }
+
+      - run: cd frontend && npm ci && npm test
+      - run: cd backend  && npm ci && npm test
+
+  # ────────────────────────────────────────────────────────────────
+  # 4. SAST — Static Application Security Testing
+  # ────────────────────────────────────────────────────────────────
+  sast:
+    name: 🔒 SAST (CodeQL)
+    runs-on: ubuntu-latest
+    needs: lint
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+
+      - name: Run CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:javascript-typescript'
+
+  # ────────────────────────────────────────────────────────────────
+  # 5. DEPENDENCY AUDIT
+  # ────────────────────────────────────────────────────────────────
+  dependency-audit:
+    name: 📦 Dependency audit
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}' }
+
+      - name: Audit frontend deps
+        run: cd frontend && npm audit --audit-level=high
+
+      - name: Audit backend deps
+        run: cd backend && npm audit --audit-level=high
+
+  # ────────────────────────────────────────────────────────────────
+  # 6. DOCKER BUILD + CONTAINER SCAN
+  # ────────────────────────────────────────────────────────────────
+  container-scan:
+    name: 🐳 Container scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: [test, sast]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t homeguard-api:${{ github.sha }} ./backend
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:    'homeguard-api:${{ github.sha }}'
+          format:       'sarif'
+          output:       'trivy-results.sarif'
+          severity:     'HIGH,CRITICAL'
+          exit-code:    '1'          # fail CI on HIGH/CRITICAL vulns
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # ────────────────────────────────────────────────────────────────
+  # 7. DEPLOY BACKEND → FLY.IO  (main branch only)
+  # ────────────────────────────────────────────────────────────────
+  deploy-backend:
+    name: 🚀 Deploy API → Fly.io
+    runs-on: ubuntu-latest
+    needs: [container-scan, dependency-audit, secret-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy to Fly.io
+        run: flyctl deploy --remote-only
+        working-directory: backend
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+  # ────────────────────────────────────────────────────────────────
+  # 8. DEPLOY FRONTEND → VERCEL  (main branch only)
+  # ────────────────────────────────────────────────────────────────
+  deploy-frontend:
+    name: 🌐 Deploy frontend → Vercel
+    runs-on: ubuntu-latest
+    needs: [test, secret-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token:   ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id:  ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: frontend
+          vercel-args: '--prod'

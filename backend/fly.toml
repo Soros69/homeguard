@@ -1,0 +1,38 @@
+# fly.toml — Fly.io deployment config for HomeGuard API
+# Deploy with: fly deploy (from the backend/ folder)
+
+app      = "homeguard-api"
+primary_region = "lhr"   # London — closest to UK users
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT     = "4000"
+
+[http_service]
+  internal_port        = 4000
+  force_https          = true
+  auto_stop_machines   = true   # saves money — scales to zero when idle
+  auto_start_machines  = true
+  min_machines_running = 0      # free tier: 0 when no traffic
+
+  [http_service.concurrency]
+    type       = "requests"
+    soft_limit = 50
+    hard_limit = 100
+
+[[vm]]
+  size   = "shared-cpu-1x"   # free tier eligible
+  memory = "256mb"
+
+[checks]
+  [checks.health]
+    grace_period = "10s"
+    interval     = "30s"
+    method       = "GET"
+    path         = "/health"
+    port         = 4000
+    timeout      = "5s"
+    type         = "http"

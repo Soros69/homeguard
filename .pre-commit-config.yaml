@@ -1,0 +1,39 @@
+# Install: pip install pre-commit && pre-commit install
+# Runs automatically on every `git commit`
+
+repos:
+  # ── Detect secrets before they ever leave your machine ──────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  # ── General file hygiene ─────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: detect-private-key       # catches RSA/PEM keys
+      - id: no-commit-to-branch
+        args: ['--branch', 'main']   # force PRs, no direct pushes to main
+
+  # ── Node / TypeScript linting ────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: eslint-frontend
+        name: ESLint (frontend)
+        entry: bash -c 'cd frontend && npm run lint'
+        language: system
+        pass_filenames: false
+        files: \.(ts|tsx)$
+
+      - id: tsc-backend
+        name: TypeScript check (backend)
+        entry: bash -c 'cd backend && npx tsc --noEmit'
+        language: system
+        pass_filenames: false
+        files: \.ts$
